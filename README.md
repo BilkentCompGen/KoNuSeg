@@ -2,6 +2,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/BilkentCompGen/KoNuSeg?color=blue&cacheSeconds=60)](https://github.com/BilkentCompGen/KoNuSeg/releases)
 [![Last Commit](https://img.shields.io/github/last-commit/BilkentCompGen/KoNuSeg)](https://github.com/BilkentCompGen/KoNuSeg/commits/main)
 [![License](https://img.shields.io/github/license/BilkentCompGen/KoNuSeg?cacheSeconds=60)](https://github.com/BilkentCompGen/KoNuSeg/blob/main/LICENSE)
+
 `KoNuSeg` is a C++ tool for fast, efficient repeat detection using k-mer counting and Bloom filters, backed by `btllib`.
 
 ---
