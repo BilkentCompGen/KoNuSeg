@@ -183,28 +183,6 @@ class SegmentInfo {
             return;
         };
     
-        /*
-        SegmentInfo(const SegmentInfo& val)
-        {
-            this->segmentName = val.segmentName;
-            this->start = val.start;
-            this->end = val.end;
-            this->count = val.count;
-            return;
-        };
-    
-        ~SegmentInfo() { return; };
-
-        public:
-        SegmentInfo& operator=(const SegmentInfo& other) {
-            this->segmentName = other.segmentName;
-            this->start = other.start;
-            this->end = other.end;
-            this->count = other.count;
-            return *this;
-        }
-        */
-    
 };
     
     

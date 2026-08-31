@@ -42,14 +42,14 @@ void printUsage(const char* programName) {
          << "  -o                Path to output BED file\n"
          << "Options (with defaults):\n"
          << "  -g                Genome size (default: 3000000000)\n"
-         << "  -s                Seed value\n"
+         << "  -s                Seed value (default: 10010111001110100101110011101001)\n"
          << "  -k                K-mer length (default: 32)\n"
          << "  -fpr              False positive rate (default: 0.01)\n"
          << "  -w                Filtering window size (default: 5)\n"
-         << "  -minseg           Minimum segment length for the merging (default:500)"
-         << "  -c_thresh         Count threshold for the merging (default:1)"
-         << "  -anum             Distinct number of kmers in assembly/reference (default: 1500000000)\n" // Fixed semicolon
-         << "  -knum             Distinct number of kmers in reads (default: 1500000000)\n";              // Fixed semicolon
+         << "  -minseg           Minimum segment length for the merging (default:500)\n"
+         << "  -c_thresh         Count threshold for the merging (default:1)\n"
+         << "  -anum             Distinct number of kmers in assembly/reference (default: 1500000000)\n" 
+         << "  -knum             Distinct number of kmers in reads (default: 1500000000)\n";
 }
 
 
