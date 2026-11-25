@@ -1,31 +1,153 @@
 #include<konuseg.hpp>
+#include<limits>
+#include<stdexcept>
+
+static bool parseUnsigned64(const string& s, unsigned long long& out, unsigned long long minVal = 0, unsigned long long maxVal = numeric_limits<unsigned long long>::max()) {
+    if (s.empty() || s[0] == '-') return false;
+    try {
+        size_t pos = 0;
+        unsigned long long val = stoull(s, &pos);
+        if (pos != s.size() || val < minVal || val > maxVal) return false;
+        out = val;
+        return true;
+    } catch (const exception&) {
+        return false;
+    }
+}
 
 Config* parseCommandLine(int argc, char **argv) {
     Config *config = new Config(); // Starts with all the default values loaded
-    
+
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
-        
+
+        if (arg == "-h" || arg == "--help") {
+            delete config;
+            return nullptr;
+        }
+
+        if (i + 1 >= argc) {
+            cerr << "Error: Missing value for argument '" << arg << "'." << endl;
+            delete config;
+            return nullptr;
+        }
+
+        string val = argv[++i];
+        unsigned long long tmpU64 = 0;
+
         // Check for file paths (Required)
-        if (arg == "-fq" && i + 1 < argc) config->infile_fastq = argv[++i];
-        else if (arg == "-fa" && i + 1 < argc) config->infile_fasta = argv[++i];
-        else if (arg == "-o" && i + 1 < argc) config->outfile_bed = argv[++i];
-        
+        if (arg == "-fq") config->infile_fastq = val;
+        else if (arg == "-fa") config->infile_fasta = val;
+        else if (arg == "-o") config->outfile_bed = val;
+
         // Check for optional parameters (Overrides defaults if provided)
-        else if (arg == "-g" && i + 1 < argc) config->genome_size = stoll(argv[++i]);
-        else if (arg == "-k" && i + 1 < argc) config->k_len = stoi(argv[++i]);
-		else if (arg == "-s" && i + 1 < argc) config->seed1 = argv[++i];
-        else if (arg == "-fpr" && i + 1 < argc) config->fpr = stod(argv[++i]);
-        else if (arg == "-w" && i + 1 < argc) config->window_size = stoi(argv[++i]);
-        else if (arg == "-minseg" && i + 1 < argc) config->seg_len = stoi(argv[++i]);
-        else if (arg == "-c_thresh" && i + 1 < argc) config->count_threshold = stoi(argv[++i]);
-        else if (arg == "-knum" && i + 1 < argc) config->k_num = stoi(argv[++i]);
-        else if (arg == "-anum" && i + 1 < argc) config->a_num = stoi(argv[++i]);
+        else if (arg == "-g") {
+            try {
+                size_t pos = 0;
+                long long g = stoll(val, &pos);
+                if (pos != val.size() || g <= 0) throw invalid_argument("invalid genome size");
+                config->genome_size = g;
+            } catch (const exception&) {
+                cerr << "Error: Invalid value for -g: '" << val << "' (must be a positive integer)." << endl;
+                delete config;
+                return nullptr;
+            }
+        }
+        else if (arg == "-k") {
+            if (!parseUnsigned64(val, tmpU64, 1, numeric_limits<uint>::max())) {
+                cerr << "Error: Invalid value for -k: '" << val << "' (must be a positive integer)." << endl;
+                delete config;
+                return nullptr;
+            }
+            config->k_len = static_cast<uint>(tmpU64);
+        }
+        else if (arg == "-s") {
+            config->seed1 = val;
+        }
+        else if (arg == "-fpr") {
+            try {
+                size_t pos = 0;
+                double fpr = stod(val, &pos);
+                if (pos != val.size() || !(fpr > 0.0 && fpr < 1.0)) throw invalid_argument("invalid fpr");
+                config->fpr = fpr;
+            } catch (const exception&) {
+                cerr << "Error: Invalid value for -fpr: '" << val << "' (must be in (0, 1))." << endl;
+                delete config;
+                return nullptr;
+            }
+        }
+        else if (arg == "-w") {
+            if (!parseUnsigned64(val, tmpU64, 1, numeric_limits<uint>::max())) {
+                cerr << "Error: Invalid value for -w: '" << val << "' (must be >= 1)." << endl;
+                delete config;
+                return nullptr;
+            }
+            config->window_size = static_cast<uint>(tmpU64);
+        }
+        else if (arg == "-minseg") {
+            if (!parseUnsigned64(val, tmpU64, 1, numeric_limits<uint>::max())) {
+                cerr << "Error: Invalid value for -minseg: '" << val << "' (must be >= 1)." << endl;
+                delete config;
+                return nullptr;
+            }
+            config->seg_len = static_cast<uint>(tmpU64);
+        }
+        else if (arg == "-c_thresh") {
+            if (!parseUnsigned64(val, tmpU64, 0, numeric_limits<uint>::max())) {
+                cerr << "Error: Invalid value for -c_thresh: '" << val << "' (must be >= 0)." << endl;
+                delete config;
+                return nullptr;
+            }
+            config->count_threshold = static_cast<uint>(tmpU64);
+        }
+        else if (arg == "-knum") {
+            if (!parseUnsigned64(val, tmpU64, 1, numeric_limits<ulong>::max())) {
+                cerr << "Error: Invalid value for -knum: '" << val << "' (must be a positive 64-bit integer)." << endl;
+                delete config;
+                return nullptr;
+            }
+            config->k_num = static_cast<ulong>(tmpU64);
+        }
+        else if (arg == "-anum") {
+            if (!parseUnsigned64(val, tmpU64, 1, numeric_limits<ulong>::max())) {
+                cerr << "Error: Invalid value for -anum: '" << val << "' (must be a positive 64-bit integer)." << endl;
+                delete config;
+                return nullptr;
+            }
+            config->a_num = static_cast<ulong>(tmpU64);
+        }
+        else {
+            cerr << "Error: Unknown option '" << arg << "'." << endl;
+            delete config;
+            return nullptr;
+        }
     }
 
     // Force user to give the file paths
     if (config->infile_fastq.empty() || config->infile_fasta.empty() || config->outfile_bed.empty()) {
         cerr << "Error: You must provide -fq (fastq), -fa (fasta), and -o (bed) arguments." << endl;
+        delete config;
+        return nullptr;
+    }
+
+    // Validate seed string and compatibility with k-mer length
+    if (config->seed1.size() != config->k_len) {
+        cerr << "Error: Seed length (-s: " << config->seed1.size()
+             << ") must match k-mer length (-k: " << config->k_len << ")." << endl;
+        delete config;
+        return nullptr;
+    }
+    bool hasCarePos = false;
+    for (char c : config->seed1) {
+        if (c == '1') hasCarePos = true;
+        else if (c != '0') {
+            cerr << "Error: Seed (-s) must contain only '0' and '1' characters." << endl;
+            delete config;
+            return nullptr;
+        }
+    }
+    if (!hasCarePos) {
+        cerr << "Error: Seed (-s) must contain at least one '1' position." << endl;
         delete config;
         return nullptr;
     }
@@ -70,7 +192,10 @@ int main(int argc, char **argv)
     cout << "\t\t[i] > Processing command line arguments..." << endl;
     
     Config *config_file = parseCommandLine(argc, argv);
-    if (config_file == nullptr) return -1;
+    if (config_file == nullptr) {
+        printUsage(argv[0]);
+        return 1;
+    }
 
     config_file->printConfig();
 

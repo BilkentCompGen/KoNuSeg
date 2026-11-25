@@ -1,4 +1,4 @@
-CC=/usr/bin/g++-11
+CC?=/usr/bin/g++-11
 SRC=./src
 INCL=./incl
 LIB=./lib

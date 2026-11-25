@@ -56,7 +56,6 @@ void mergeSegments(
 	uint segCount;
 
 	std::vector<float> values;
-	uint coverage_depth = roundCount(static_cast<float>(k_reads) / k_assembly);
 	uint gap_len = k_len;
 
 		
