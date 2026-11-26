@@ -9,17 +9,38 @@
 #include <omp.h>
 #include <cmath>
 #include <ctime>
+#include <climits>
+#include <vector>
+#include <algorithm>
+#include <iomanip>
+#include <fstream>
+#if __has_include(<boost/algorithm/string.hpp>)
 #include <boost/algorithm/string.hpp>
-#include <boost/container/list.hpp>
+#else
+namespace boost {
+inline void trim_right(std::string& s) {
+    const auto pos = s.find_last_not_of(" \t\n\r\f\v");
+    if (pos == std::string::npos) s.clear();
+    else s.erase(pos + 1);
+}
+inline void trim(std::string& s) {
+    trim_right(s);
+    const auto pos = s.find_first_not_of(" \t\n\r\f\v");
+    if (pos != std::string::npos) s.erase(0, pos);
+}
+}
+#endif
+#if __has_include(<boost/container/stable_vector.hpp>)
 #include <boost/container/stable_vector.hpp>
-#include <boost/range/algorithm.hpp>
+template <typename T>
+using KoNuSegVector = boost::container::stable_vector<T>;
+#else
+template <typename T>
+using KoNuSegVector = std::vector<T>;
+#endif
 #include <btllib/bloom_filter.hpp>
 #include <btllib/counting_bloom_filter.hpp>
 #include <btllib/nthash.hpp>
-#include <boost/container/stable_vector.hpp>
-#include <boost/tokenizer.hpp>
-#include <boost/algorithm/string.hpp>
-#include <boost/accumulators/statistics/median.hpp>
 
 #include <chrono>
 
@@ -235,15 +256,15 @@ inline float roundCount(float count)
 
 
 // aliases
-typedef boost::container::stable_vector<Sequence> SEQLIST;
-typedef boost::container::stable_vector<uint> REPLIST;
+typedef KoNuSegVector<Sequence> SEQLIST;
+typedef KoNuSegVector<uint> REPLIST;
 typedef btllib::SeedBloomFilter SBF;
 typedef btllib::CountingBloomFilter16 CBF;
-typedef boost::container::stable_vector<ContigRepeatInfo> CONTIGLIST;
-typedef boost::container::stable_vector<ContigInfo> CONTIGTABLE;
-typedef boost::container::stable_vector<SegmentInfo> SEGMENTINFO;
-typedef boost::container::stable_vector<WindowInfo> WINDOWINFO;
-typedef boost::container::stable_vector< SEGMENTINFO* > SEGMENTTABLE;
+typedef KoNuSegVector<ContigRepeatInfo> CONTIGLIST;
+typedef KoNuSegVector<ContigInfo> CONTIGTABLE;
+typedef KoNuSegVector<SegmentInfo> SEGMENTINFO;
+typedef KoNuSegVector<WindowInfo> WINDOWINFO;
+typedef KoNuSegVector< SEGMENTINFO* > SEGMENTTABLE;
 
 
 

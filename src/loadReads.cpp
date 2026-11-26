@@ -9,27 +9,29 @@ CBF *loadReads(
 	uint read_counter = 0;
 
 	
-	// Calculate the optimal size (m)
-	size_t cbfSize = static_cast<size_t>((-1) * (k_num * log(fpr)) / (log(2) * log(2)));
+	// Calculate the optimal number of counter slots (m) and convert to bytes for CountingBloomFilter16 (2 bytes per slot)
+	size_t cbfSlots = static_cast<size_t>((-1.0) * (static_cast<double>(k_num) * log(fpr)) / (log(2) * log(2)));
+	if (cbfSlots < 1) cbfSlots = 1;
+	size_t cbfBytes = cbfSlots * sizeof(uint16_t);
 
 	// Calculate and store the optimal number of hash functions (k)
-	uint64_t optHashFunctions = static_cast<uint64_t>(round(((double)cbfSize / k_num) * log(2)));
+	uint64_t optHashFunctions = static_cast<uint64_t>(round((static_cast<double>(cbfSlots) / k_num) * log(2)));
 
 	// Safety check: ensure at least one hash function is used
 	if (optHashFunctions < 1) optHashFunctions = 1;
 
 	cout << "\t\t\t[i] >----------------------------------------" << endl;
-	cout << "\t\t\t[i] >CBF Size:    " << cbfSize <<  " bits" << endl;
+	cout << "\t\t\t[i] >CBF Size:    " << cbfSlots << " counters (" << cbfBytes << " bytes)" << endl;
 
-	// Calculate GB for printing: CBF uses 1 byte per slot
+	// Calculate GB for printing: CountingBloomFilter16 uses 2 bytes (uint16_t) per slot
 	cout << "\t\t\t[i] >CBF Memory:   " << std::fixed << std::setprecision(4) 
-		<< (double)cbfSize / (1024.0 * 1024.0 * 1024.0) << " GB" << endl;
+		<< static_cast<double>(cbfBytes) / (1024.0 * 1024.0 * 1024.0) << " GB" << endl;
 
 	cout << "\t\t\t[i] >Optimal Hash Functions: " << optHashFunctions << endl;
 	cout << "\t\t\t[i] >----------------------------------------" << endl;
 
-	// Initialize the CBF with the optimized values
-	CBF* cbf = new CBF(cbfSize, optHashFunctions);
+	// Initialize the CBF with the byte budget and optimized hash count
+	CBF* cbf = new CBF(cbfBytes, optHashFunctions);
 
 	ifstream reads(readsFile);
 
@@ -72,7 +74,7 @@ CBF *loadReads(
 	cout <<"\t\t\t[i] >----------------------------------------" << endl;
 	cout <<"\t\t\t[i] >K-MERS IN BLOOM FILTER: " << k_assembly << endl;
 	cout <<"\t\t\t[i] >K-MERS IN COUNTING BLOOM FILTER: " << k_reads << endl;
-	cout <<"\t\t\t[i] >BLOOM FITLER COVERAGE DEPTH: " << round(static_cast<float>(k_reads) / k_assembly) << endl;
+	cout <<"\t\t\t[i] >BLOOM FITLER COVERAGE DEPTH: " << (k_assembly > 0 ? round(static_cast<float>(k_reads) / static_cast<float>(k_assembly)) : 0.0f) << endl;
 	cout <<"\t\t\t[i] >----------------------------------------" << endl;
 
 	return cbf;
@@ -95,7 +97,7 @@ void populateCBF(
 
 			auto hit_seeds = seed_bf->contains(temp);
 
-			if (find(hit_seeds[0].begin(), hit_seeds[0].end(), 0) != hit_seeds[0].end())
+			if (!hit_seeds.empty() && find(hit_seeds[0].begin(), hit_seeds[0].end(), 0) != hit_seeds[0].end())
 			{
 				populate(temp, seeds, cbf);
 				k_reads = k_reads + 1;
