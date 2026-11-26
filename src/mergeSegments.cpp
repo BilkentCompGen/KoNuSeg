@@ -1,14 +1,6 @@
 #include <mergeSegments.hpp>
 
-// Function to insert a value into the array
-void insert(std::vector<float>& arr, float value) {
-    arr.push_back(value);
-}
-
-// Function to clear the array
-void clear(std::vector<float>& arr) {
-    arr.clear();
-}
+namespace {
 
 // Sort pooled copy estimates, discard the top quartile (at least 1 highest outlier when size >= 2)
 // to suppress Bloom filter hash-collision inflation, and return the rounded median of the remainder.
@@ -26,115 +18,110 @@ float processData(std::vector<float>& arr) {
 
     if (remaining_size % 2 == 0) {
         return roundCount((arr[remaining_size / 2 - 1] + arr[remaining_size / 2]) / 2.0f);
-    } else {
-        return roundCount(arr[remaining_size / 2]);
     }
+    return roundCount(arr[remaining_size / 2]);
 }
 
+} // namespace
 
 bool mergeSegments(
-	string outfile_path, uint k_len, uint min_seg_len, uint count_threshold)
+    const std::string& outfile_path,
+    uint32_t k_len,
+    uint32_t min_seg_len,
+    uint32_t count_threshold,
+    const SEGMENTTABLE& seg_table)
 {
-	string merged_path = outfile_path + "_merged.bed";
-	ofstream wout(merged_path);
-	if (!wout.is_open()) {
-		cerr << "[!] Error: Could not open merged output BED file: " << merged_path << endl;
-		return false;
-	}
+    const std::string merged_path = konuseg::deriveMergedBedPath(outfile_path);
+    std::ofstream wout(merged_path);
+    if (!wout.is_open()) {
+        std::cerr << "[!] Error: Could not open merged output BED file: " << merged_path << std::endl;
+        return false;
+    }
 
-	string currentSegment = "";
-	uint segStartBase = 0;
-	uint segEndBase = 0;
+    std::string currentSegment;
+    uint32_t segStartBase = 0;
+    uint32_t segEndBase = 0;
+    std::vector<float> values;
+    SEGMENTINFO valSegment;
 
-	std::vector<float> values;
-	SEGMENTINFO valSegment;
-	
-	for (size_t pos = 0; pos < segTable->size(); pos++)
-	{
-		SEGMENTINFO* segItem = segTable->at(pos);
-		if (segItem == nullptr) continue;
+    for (const SEGMENTINFO& segItem : seg_table)
+    {
+        for (const SegmentInfo& nextSeg : segItem)
+        {
+            const float nextRounded = roundCount(nextSeg.count);
 
-		// Each row in segTable contains all the segments of the same contig
-		for (size_t i = 0; i < segItem->size(); i++)
-		{
-			const SegmentInfo& nextSeg = segItem->at(i);
-			const float nextRounded = roundCount(nextSeg.count);
+            if (currentSegment.empty())
+            {
+                currentSegment = nextSeg.segmentName;
+                segStartBase = nextSeg.start;
+                segEndBase = nextSeg.end;
+                values.push_back(nextRounded);
+            }
+            else if (currentSegment == nextSeg.segmentName)
+            {
+                const uint32_t currentLen = (segEndBase >= segStartBase) ? (segEndBase - segStartBase) : 0;
+                const uint32_t nextLen = (nextSeg.end >= nextSeg.start) ? (nextSeg.end - nextSeg.start) : 0;
+                const bool withinGap = (nextSeg.start <= segEndBase) ||
+                    ((nextSeg.start - segEndBase) <= 3 * k_len);
 
-			if (currentSegment.empty())
-			{
-				currentSegment = nextSeg.segmentName;
-				segStartBase = nextSeg.start;
-				segEndBase = nextSeg.end;
-				insert(values, nextRounded);
-			}
-			else if (currentSegment == nextSeg.segmentName)
-			{
-				const uint currentLen = (segEndBase >= segStartBase) ? (segEndBase - segStartBase) : 0;
-				const uint nextLen = (nextSeg.end >= nextSeg.start) ? (nextSeg.end - nextSeg.start) : 0;
-				const bool withinGap = (nextSeg.start <= segEndBase) ||
-					((nextSeg.start - segEndBase) <= 3 * k_len);
+                // Avoid absorbing a >= k_len flanking locus into an already full-sized (>= min_seg_len) block
+                // when their copy numbers differ by more than count_threshold, while smoothing sub-kmer (< k_len) artifacts.
+                const bool incompatibleLongBlock = (currentLen >= k_len) &&
+                    (nextLen >= min_seg_len) &&
+                    !values.empty() &&
+                    (std::fabs(nextRounded - values.back()) > static_cast<float>(count_threshold));
 
-				// Avoid absorbing a >= k_len flanking locus into an already full-sized (>= min_seg_len) block
-				// when their copy numbers differ by more than count_threshold, while smoothing sub-kmer (< k_len) artifacts.
-				const bool incompatibleLongBlock = (currentLen >= k_len) &&
-					(nextLen >= min_seg_len) &&
-					!values.empty() &&
-					(std::fabs(nextRounded - values.back()) > static_cast<float>(count_threshold));
+                if (currentLen < min_seg_len && withinGap && !incompatibleLongBlock)
+                {
+                    if (nextSeg.end > segEndBase) {
+                        segEndBase = nextSeg.end;
+                    }
+                    values.push_back(nextRounded);
+                }
+                else
+                {
+                    const float mergedCount = processData(values);
+                    if (mergedCount > 0.0f) {
+                        valSegment.emplace_back(currentSegment, segStartBase, segEndBase, mergedCount);
+                    }
 
-				if (currentLen < min_seg_len && withinGap && !incompatibleLongBlock)
-				{
-					if (nextSeg.end > segEndBase) {
-						segEndBase = nextSeg.end;
-					}
-					insert(values, nextRounded);
-				}
-				else
-				{
-					float mergedCount = processData(values);
-					if (mergedCount > 0.0f) {
-						valSegment.push_back(SegmentInfo(currentSegment, segStartBase, segEndBase, mergedCount));
-					}
+                    currentSegment = nextSeg.segmentName;
+                    segStartBase = nextSeg.start;
+                    segEndBase = nextSeg.end;
+                    values.clear();
+                    values.push_back(nextRounded);
+                }
+            }
+            else
+            {
+                const float mergedCount = processData(values);
+                if (mergedCount > 0.0f) {
+                    valSegment.emplace_back(currentSegment, segStartBase, segEndBase, mergedCount);
+                }
+                currentSegment = nextSeg.segmentName;
+                segStartBase = nextSeg.start;
+                segEndBase = nextSeg.end;
+                values.clear();
+                values.push_back(nextRounded);
+            }
+        }
+    }
 
-					currentSegment = nextSeg.segmentName;
-					segStartBase = nextSeg.start;
-					segEndBase = nextSeg.end;
-					clear(values);
-					insert(values, nextRounded);
-				}
-			}
-			// Different contig
-			else
-			{
-				float mergedCount = processData(values);
-				if (mergedCount > 0.0f)
-				{
-					valSegment.push_back(SegmentInfo(currentSegment, segStartBase, segEndBase, mergedCount));
-				}
-				currentSegment = nextSeg.segmentName;
-				segStartBase = nextSeg.start;
-				segEndBase = nextSeg.end;
-				clear(values);
-				insert(values, nextRounded);
-			}
-		}
-	}
+    if (!currentSegment.empty() && !values.empty())
+    {
+        const float mergedCount = processData(values);
+        if (mergedCount > 0.0f) {
+            valSegment.emplace_back(currentSegment, segStartBase, segEndBase, mergedCount);
+        }
+    }
 
-	// Flush the last segment using processData(values) when non-empty
-	if (!currentSegment.empty() && !values.empty())
-	{
-		float mergedCount = processData(values);
-		if (mergedCount > 0.0f) {
-			valSegment.push_back(SegmentInfo(currentSegment, segStartBase, segEndBase, mergedCount));
-		}
-	}
+    for (const SegmentInfo& seg : valSegment)
+    {
+        wout << seg.segmentName << "\t" << seg.start << "\t" << seg.end << "\t" << seg.count << "\n";
+    }
 
-	for (size_t j = 0; j < valSegment.size(); j++)
-	{
-		wout << valSegment.at(j).segmentName << "\t" << valSegment.at(j).start << "\t" << valSegment.at(j).end << "\t" << valSegment.at(j).count << "\n";
-	}
-
-	wout.flush();
-	bool ok = wout.good();
-	wout.close();
-	return ok;
+    wout.flush();
+    const bool ok = wout.good();
+    wout.close();
+    return ok;
 }

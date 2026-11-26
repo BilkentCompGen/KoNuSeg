@@ -1,15 +1,14 @@
 #include <loadAssembly.hpp>
 
-
-SEQLIST *loadAssembly(string assemblyFile, uint k_len)
+bool loadAssembly(const std::string& assemblyFile, SEQLIST& outAssembly)
 {
-    (void)k_len;
+    outAssembly.clear();
 
-    if (assemblyFile != "-" && assemblyFile.find("://") == string::npos) {
+    if (assemblyFile != "-" && assemblyFile.find("://") == std::string::npos) {
         std::ifstream checkFile(assemblyFile);
         if (!checkFile.is_open()) {
             std::cerr << "[!] Error: Could not open assembly file: " << assemblyFile << std::endl;
-            return nullptr;
+            return false;
         }
     }
 
@@ -17,29 +16,26 @@ SEQLIST *loadAssembly(string assemblyFile, uint k_len)
     FILE* fp = assemblySource;
     if (fp == nullptr) {
         std::cerr << "[!] Error: Could not open assembly stream: " << assemblyFile << std::endl;
-        return nullptr;
+        return false;
     }
 
-    SEQLIST *myAssembly = new SEQLIST();
     std::string line, name, content;
 
-    while (readLineFromStream(fp, line)) {
-        boost::trim(line);
+    while (konuseg::readLineFromStream(fp, line)) {
+        konuseg::trim(line);
         if (line.empty()) {
             continue;
         }
 
-        // Identify the FASTA header line
         if (line[0] == '>') {
-            // If we have DNA accumulated from a previous record, save it now
             if (!name.empty() && !content.empty()) {
-                myAssembly->push_back(Sequence(name, content));
+                outAssembly.emplace_back(name, std::move(content));
                 content.clear();
             }
 
-            // Remove the leading '>' and truncate at the first whitespace for valid BED chrom IDs
+            // Strip leading '>' and truncate at first whitespace for valid BED chrom IDs
             std::string header = line.substr(1);
-            boost::trim(header);
+            konuseg::trim(header);
             const auto wsPos = header.find_first_of(" \t");
             name = (wsPos == std::string::npos) ? header : header.substr(0, wsPos);
         } else {
@@ -47,11 +43,10 @@ SEQLIST *loadAssembly(string assemblyFile, uint k_len)
         }
     }
 
-    // Capture the very last sequence in the file
     if (!name.empty() && !content.empty()) {
-        myAssembly->push_back(Sequence(name, content));
+        outAssembly.emplace_back(name, std::move(content));
     }
 
     assemblySource.close();
-    return myAssembly;
+    return true;
 }

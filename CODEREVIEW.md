@@ -29,7 +29,7 @@ However, cross-checking the implementation line-by-line against `btllib` API con
 | **H5** | **High (Fixed)** | [checkRepeats.cpp](file:///home/calkan/code/bilkentcompgen/KoNuSeg/src/checkRepeats.cpp#L63-L79), [mergeSegments.cpp](file:///home/calkan/code/bilkentcompgen/KoNuSeg/src/mergeSegments.cpp#L85-L89) | Tautological self-comparison `contigName.compare(contigName)` and unsigned integer underflows (`start - 2`, `start - segEndBase`) |
 | **M1–M6** | **Medium (Fixed)** | Paper vs. Code | Quantized integer coverage at low depth, reversed Table 2 footnote / unused `-c_thresh` in Stage 2, dead `-g` flag, unexposed filter serialization |
 | **P1–P3** | **Medium (Fixed)** | [populateBF.cpp](file:///home/calkan/code/bilkentcompgen/KoNuSeg/src/populateBF.cpp#L44-L95), [loadReads.cpp](file:///home/calkan/code/bilkentcompgen/KoNuSeg/src/loadReads.cpp#L11-L92), [checkRepeats.cpp](file:///home/calkan/code/bilkentcompgen/KoNuSeg/src/checkRepeats.cpp#L126-L198) | Non-rolling `substr` + repeated heap allocations per k-mer (5×–20× slowdown), per-read OpenMP fork/join, data race on `s_pos`, non-deterministic output order |
-| **L1–L5** | **Low** | Build / Hygiene | Memory leaks (`segTable` elements, `valSegment`), hardcoded `/usr/bin/g++-11`, undocumented/removable Boost dependency, tracked binaries, no `.gitignore` |
+| **L1–L5** | **Low (Fixed)** | Build / Hygiene | Memory leaks (`segTable` elements, `valSegment`), `using namespace std;` / globals, hardcoded `/usr/bin/g++-11`, Boost dependency, `.gitignore`, CLI polish |
 
 ---
 
@@ -254,9 +254,8 @@ However, cross-checking the implementation line-by-line against `btllib` API con
   - `using namespace std;` at global scope in the root header pollutes all translation units.
   - Mutable globals (`inline ulong k_assembly = 0;`, `inline ulong k_reads = 0;`, `inline SEGMENTTABLE* segTable = new SEGMENTTABLE();`) create hidden coupling across pipeline stages.
   - Missing standard headers (`<iomanip>` for `std::setprecision` in `loadReads.cpp:25`, `<algorithm>` for `std::sort`/`std::find`, `<fstream>`) rely on transitive includes from Boost/`btllib`.
-- **L3. Build System, GCC 11 Slim-LTO Lock-In, & Boost Dependency ([Makefile](file:///home/calkan/code/bilkentcompgen/KoNuSeg/Makefile), [README.md](file:///home/calkan/code/bilkentcompgen/KoNuSeg/README.md))**:
-  - `README.md` states *"GCC / G++ version **11** or higher"*, whereas `lib/libbtllib.a` was compiled with **GCC 11 slim LTO** (LTO bytecode version 11.3, zero-size `.text` sections). Consequently, GCC 12/13+ cannot link `lib/libbtllib.a` (`lto1: bytecode stream ... generated with LTO version 11.3 instead of the expected 13.1`); **exact `g++-11` is required** unless `libbtllib.a` is built without slim LTO (or with `-ffat-lto-objects`).
-  - `incl/data_structs.hpp` previously required six Boost headers (four completely unused) that were undocumented in `README.md`; C++17 `__has_include` fallbacks have now been added in `incl/data_structs.hpp` so Boost is optional.
+- **L3. Build System, GCC 11 Slim-LTO Lock-In, & Boost Dependency ([Makefile](file:///home/calkan/code/bilkentcompgen/KoNuSeg/Makefile), [README.md](file:///home/calkan/code/bilkentcompgen/KoNuSeg/README.md)) — Fixed**:
+  - Previously, prebuilt `lib/libbtllib.a` was compiled with **GCC 11 slim LTO** (`LTO 11.3`), preventing GCC 12/13+ from linking it. `Makefile` now automatically fetches upstream `btllib` v1.4.10 and compiles `lib/libbtllib.a` locally with `$(CXX)` (removing the `.a` distribution requirement and LTO version lock-in), and all Boost dependencies have been eliminated.
 - **L4. Repository Hygiene**:
   - Compiled binary `bin/konuseg.out`, 8 MB static library `lib/libbtllib.a`, duplicate `cpptoml.h` copies, and `btllib`'s upstream test suite (`incl/tests/*`) are committed to Git, and there is no `.gitignore`.
 - **L5. Minor CLI / Logging Polish**:

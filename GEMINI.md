@@ -15,7 +15,7 @@
 ## 2. Repository Structure & External API Policy
 
 > **CRITICAL RULE — DO NOT MODIFY `btllib`**:
-> `btllib` (`incl/btllib/`, `incl/cpptoml/`, `incl/tests/`, `lib/libbtllib.a`, and `lib/btllib/`) is a vendored external API (v1.4.9) and **MUST NOT be modified under any circumstances**. All bug fixes, optimizations, and feature changes must be implemented strictly in KoNuSeg's own source and header files (`src/*.cpp`, `incl/*.hpp` outside `incl/btllib/`, and `Makefile`).
+> `btllib` (`incl/btllib/`, `incl/cpptoml/`, `incl/tests/`, and `lib/btllib/`) is a vendored external API (v1.4.9/1.4.10) and **MUST NOT be modified under any circumstances**. `Makefile` automatically fetches upstream `btllib` v1.4.10 sources into `lib/btllib-1.4.10/` (gitignored) and compiles `lib/libbtllib.a` locally so prebuilt `.a` archives do not need to be distributed. All bug fixes, optimizations, and feature changes must be implemented strictly in KoNuSeg's own source and header files (`src/*.cpp`, `incl/*.hpp` outside `incl/btllib/`, and `Makefile`).
 
 ```text
 KoNuSeg/
@@ -57,8 +57,9 @@ KoNuSeg/
 The pipeline executes five sequential phases orchestrated by `main()` in `src/konuseg.cpp`:
 
 ### Stage 0: Configuration & Assembly Loading (`src/konuseg.cpp`, `src/loadAssembly.cpp`)
-- `parseCommandLine()` populates and validates a `Config` instance (`incl/data_structs.hpp`), automatically synchronizing `-k` and `-s` when only one is explicitly passed.
-- `loadAssembly()` streams FASTA contigs (plain or `.gz`/`.bz2`/`.xz` via `btllib::DataSource`) into `SEQLIST` in RAM, extracting clean whitespace-trimmed BED sequence IDs so contigs can be reused during both Bloom filter population and repeat querying.
+- `parseCommandLine()` populates and validates a `Config` instance (`incl/data_structs.hpp`), automatically synchronizing `-k` and `-s` when only one is explicitly passed, and supporting `-h`/`--help` with exit status `0`.
+- `loadAssembly()` streams FASTA contigs (plain or `.gz`/`.bz2`/`.xz` via `btllib::DataSource`) into a value-owned `SEQLIST` (`std::vector<Sequence>`) in RAM, extracting clean whitespace-trimmed BED sequence IDs so contigs can be reused during both Bloom filter population and repeat querying.
+- Pipeline counts and segmented intervals are passed explicitly via `PipelineState` (`k_assembly`, `k_reads`, `seg_table`), with zero global mutable state and RAII (`std::unique_ptr`) ownership of `btllib` filters.
 
 ### Stage 1: Populating the Seed Bloom Filter (`src/populateBF.cpp`)
 - Computes optimal filter parameters from expected distinct assembly k-mers (`-anum`, $n$) and false-positive rate (`-fpr`, $p$):
@@ -84,7 +85,7 @@ The pipeline executes five sequential phases orchestrated by `main()` in `src/ko
 ### Stage 4: Segment Pooling & Merging (`src/mergeSegments.cpp`)
 - `mergeSegments()` iterates sequentially through `segTable` to smooth short segments into longer genomic blocks:
   - Concatenates consecutive unmerged segments on the same contig while accumulated segment length `< min_seg_len` (`-minseg`), inter-segment gap `<= 3 * k_len`, and without absorbing short flanking segments into already full-sized (`>= min_seg_len`) blocks whose copy state differs by `> count_threshold`.
-  - `processData()` sorts pooled copy numbers, removes the top quartile (`(size + 3) / 4` when `size >= 2`, ensuring at least 1 collision outlier is dropped even in 2–3 segment pools), takes the median of the remaining values through `roundCount()`, and writes merged intervals to `<outfile_bed>_merged.bed`.
+  - `processData()` sorts pooled copy numbers, removes the top quartile (`(size + 3) / 4` when `size >= 2`, ensuring at least 1 collision outlier is dropped even in 2–3 segment pools), takes the median of the remaining values through `roundCount()`, and writes merged intervals to `<stem>_merged.bed` (stripping a trailing `.bed` via `konuseg::deriveMergedBedPath()`).
 
 ### Copy-Number Rounding Heuristic (`roundCount()` in `incl/data_structs.hpp`)
 - `< 0.25` -> `0.0`
@@ -104,7 +105,7 @@ The pipeline executes five sequential phases orchestrated by `main()` in `src/ko
 | :--- | :---: | :--- | :--- | :--- |
 | `-fq` | Yes* | — | `Config::infile_fastq` | Input sequencing reads (FASTQ/FASTA; supports `.gz`/`.bz2`/`.xz`; *optional with `-load_cbf`) |
 | `-fa` | Yes | — | `Config::infile_fasta` | Input draft assembly contigs in FASTA format (supports `.gz`/`.bz2`/`.xz`) |
-| `-o` | Yes | — | `Config::outfile_bed` | Output path for unmerged BED (merged written to `<o>_merged.bed`) |
+| `-o` | Yes | — | `Config::outfile_bed` | Output path for unmerged BED (merged written to `<stem>_merged.bed`) |
 | `-g` | No | `3000000000` | `Config::genome_size` | Estimated genome size (sets `-anum` and `-knum` when those flags are omitted) |
 | `-s` | No | `10010111001110100101110011101001` | `Config::seed1` | Binary spaced-seed mask (`1` = match, `0` = wildcard; auto-synced if only `-k` or `-s` is passed) |
 | `-k` | No | `32` | `Config::k_len` | K-mer length |
@@ -129,9 +130,8 @@ The pipeline executes five sequential phases orchestrated by `main()` in `src/ko
 ## 5. Build, Dependencies, & Verification
 
 ### Dependencies
-1. **GCC 11 (`g++-11`) with C++17 and OpenMP**: **Specifically GCC 11 (`g++-11`) is required to link against the vendored `lib/libbtllib.a`**, because `lib/libbtllib.a` was compiled as slim LTO bytecode (`.gnu.lto_*`, LTO version 11.3, empty `.text` sections). Newer GCC versions (e.g., GCC 13 with LTO 13.1 on Ubuntu 24.04) will compile all `src/*.cpp` translation units cleanly (`g++ -c`), but the linker (`lto1`) will reject GCC 11.3 LTO bytecode (`bytecode stream in file './lib/libbtllib.a' generated with LTO version 11.3 instead of the expected 13.1`) unless `g++-11` is installed (`sudo apt install g++-11`).
-2. **Boost C++ Headers** (`libboost-dev`, optional): Used if installed (`boost/algorithm/string.hpp`, `boost/container/stable_vector.hpp`); `incl/data_structs.hpp` provides standard C++17 fallbacks (`std::vector` and `boost::trim`/`trim_right`) via `__has_include` when Boost is absent.
-3. **btllib (v1.4.9/1.4.10)**: Header files (`incl/btllib/`) and static library (`lib/libbtllib.a`) are vendored directly in the repository (**do not modify**).
+1. **C++17 Compiler with OpenMP (`g++` >= 11 or `clang++`)**: `Makefile` compiles both `lib/libbtllib.a` (without slim LTO lock-in) and KoNuSeg using the same `$(CXX)` toolchain, so GCC 11, 12, 13, 14+ all work seamlessly.
+2. **btllib (v1.4.10)**: Header files (`incl/btllib/`) are vendored in the repository (**do not modify**), and `Makefile` automatically downloads and compiles `btllib` v1.4.10 `src/btllib/*.cpp` into `lib/libbtllib.a` on first build (`make distclean` removes the cached `lib/libbtllib.a` and downloaded sources). No external Boost, Meson, or Ninja installation is required.
 
 ### Common Commands
 ```bash
@@ -152,7 +152,7 @@ make clean
 
 ## 6. Known Implementation Caveats (See `CODEREVIEW.md`)
 
-Developers modifying or extending KoNuSeg should keep the following implementation details in mind (note: **all critical, high, and medium/performance issues `C1`–`C6`, `H1`–`H5`, `M1`–`M6`, and `P1`–`P3` from `CODEREVIEW.md` have been resolved** without modifying `btllib`):
-1. **Do Not Modify `btllib`**: Always respect `btllib` API contracts from the caller side (e.g., passing byte counts `(bfBits + 7) / 8` to `SeedBloomFilter` and `cbfSlots * sizeof(uint16_t)` to `CountingBloomFilter16`, using `btllib::DataSource` for compressed stream I/O, and checking `SeedNtHash::roll()` / `!hit_seeds.empty()` on sequences that may contain `N`s).
-2. **BED Coordinate Semantics**: Both `<outfile_bed>` and `<outfile_bed>_merged.bed` emit standard **0-based, half-open `[start, end)`** BED intervals directly compatible with `bedtools`.
-3. **Global Mutable State**: `k_assembly`, `k_reads`, and `segTable` are defined as `inline` globals in `incl/data_structs.hpp`.
+Developers modifying or extending KoNuSeg should keep the following implementation details in mind (note: **all critical, high, medium/performance, and low-severity issues `C1`–`C6`, `H1`–`H5`, `M1`–`M6`, `P1`–`P3`, and `L1`–`L5` from `CODEREVIEW.md` have been resolved** without modifying `btllib`):
+1. **Do Not Modify `btllib`**: Always respect `btllib` API contracts from the caller side (e.g., passing byte counts `(bfBits + 7) / 8` to `SeedBloomFilter` and `cbfSlots * sizeof(uint16_t)` to `CountingBloomFilter16`, using `btllib::DataSource` for compressed stream I/O, and checking `SeedNtHash::roll()` on sequences that may contain `N`s).
+2. **BED Coordinate Semantics**: Both `<outfile_bed>` and `<stem>_merged.bed` emit standard **0-based, half-open `[start, end)`** BED intervals directly compatible with `bedtools`.
+3. **State & Memory Ownership**: Pipeline state (`k_assembly`, `k_reads`, `seg_table`) is encapsulated in `PipelineState`, and filters are managed via `std::unique_ptr` without raw owning pointers or global mutable state.

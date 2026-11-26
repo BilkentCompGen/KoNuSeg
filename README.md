@@ -11,9 +11,9 @@
 
 Before building `KoNuSeg`, ensure your system meets the following software and library requirements:
 
-* **Compiler**: GCC / G++ version **11** or higher (must support `C++17` and OpenMP).
+* **Compiler**: GCC / G++ version **11** or higher (must support `C++17` and OpenMP), plus `curl` or `wget` and `tar` for automatic `btllib` source retrieval on first build.
 * **Dependencies**:
-  * [btllib](https://github.com/bcgsc/btllib): Library for bioinformatics data structures (Bloom filters, sequence parsing, etc.). This library is included in this repository (version 1.4.9). 
+  * [btllib](https://github.com/bcgsc/btllib): Library for bioinformatics data structures (Bloom filters, sequence parsing, etc.). Headers are included in `incl/btllib/` and `make` automatically compiles `lib/libbtllib.a` from upstream `btllib` v1.4.10 on first build (no external Boost dependency is required). 
 ---
 
 ## Installation
@@ -26,7 +26,7 @@ cd KoNuSeg
 
 ## Compilation & Verification
 
-The project includes a `Makefile` to simplify compilation and testing. Ensure `g++-11` is available at `/usr/bin/g++-11` on your system, or update the `CC` variable in the `Makefile` to match your local compiler path.
+The project includes a `Makefile` that automatically fetches and builds `lib/libbtllib.a` on first run and compiles `KoNuSeg` using `g++` (override via `make CXX=<compiler>` if needed).
 
 ### 1. Build the Executable
 To compile the optimized production binary:
@@ -56,7 +56,7 @@ make clean
 | :--- | :--- |
 | `-fq` | Path to input reads file (FASTQ or FASTA, supports `.gz`/`.bz2`/`.xz`; optional when `-load_cbf` is used) |
 | `-fa` | Path to input assembly FASTA file (supports `.gz`/`.bz2`/`.xz`) |
-| `-o` | Path to output BED file (merged output written to `<o>_merged.bed`) |
+| `-o` | Path to output BED file (merged output written to `<stem>_merged.bed`) |
 
 ### Optional Parameters
 

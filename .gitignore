@@ -1,2 +1,9 @@
 bin/konuseg.out
 lib/libbtllib.a
+lib/btllib-*
+lib/.btllib_obj/
+*.o
+*.bf
+*.cbf
+*.meta
+test/*result*.bed

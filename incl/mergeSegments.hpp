@@ -1,10 +1,10 @@
-
 #pragma once
-
 
 #include <data_structs.hpp>
 
-
-
-bool mergeSegments(string outfile_bed, uint k_len, uint seg_len, uint count_threshold);
-
+bool mergeSegments(
+    const std::string& outfile_bed,
+    uint32_t k_len,
+    uint32_t seg_len,
+    uint32_t count_threshold,
+    const SEGMENTTABLE& seg_table);
