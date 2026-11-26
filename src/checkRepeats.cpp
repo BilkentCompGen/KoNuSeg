@@ -3,98 +3,74 @@
 // Regulate CPN to be inside user threshold
 bool copyNumberInsideThreshold(float cn, float med, float th)
 {	
-	if(cn <= med + th && cn >= med - th ){
-		if(cn > 0.1){
-			return true;
-		}
-		else{
-			return false;		
-		}
+	if (cn <= med + th && cn >= med - th) {
+		return cn > 0.1f;
 	}
-	else{
-		return false;
-	}
-
+	return false;
 }
 
-// Create unmerged segments
-void createSegments(
-	CONTIGLIST *Contigs, ofstream* wout, uint k_len, uint min_seg_len, uint count_threshold)	
+// Create unmerged segments for a single contig (lock-free; caller stores into pre-indexed segTable slot)
+SEGMENTINFO* createSegments(
+	CONTIGLIST *Contigs, uint k_len, uint count_threshold)	
 {
+	SEGMENTINFO *valSegment = new SEGMENTINFO();
 	if (Contigs == nullptr || Contigs->empty()) {
-		return;
+		return valSegment;
 	}
 
-	#pragma omp critical
+	string currentContig = Contigs->at(0).contigName;
+	uint segStartBase = Contigs->at(0).start;
+	uint segEndBase = Contigs->at(0).end;
+	uint kCount = 1;
+	const uint gap_len = k_len;
+	const float coverage_depth = (k_assembly > 0 && k_reads > 0)
+		? (static_cast<float>(k_reads) / static_cast<float>(k_assembly))
+		: 1.0f;
+	float wMedian = static_cast<float>(Contigs->at(0).numRepeats) / coverage_depth;
+
+	// Iterate through all kmers in the contig (including the final kmer)
+	for (size_t i = 1; i < Contigs->size(); i++)
 	{	
-		string currentContig = "";
-		uint segStartBase, segEndBase;
-		float wMedian;
-		uint kCount;
-		uint gap_len = k_len;
-		const float coverage_depth = (k_assembly > 0 && k_reads > 0)
-			? (static_cast<float>(k_reads) / static_cast<float>(k_assembly))
-			: 1.0f;
-		
-		// Initialising variables
-		currentContig = Contigs->at(0).contigName;
-		segStartBase = Contigs->at(0).start;
-		segEndBase = Contigs->at(0).end;
-		kCount = 1;
-		wMedian = static_cast<float>(Contigs->at(0).numRepeats) / coverage_depth;
-
-		SEGMENTINFO *valSegment = new SEGMENTINFO();
-
-		// Iterating through all kmers in the contig (including the final kmer)
-		for (size_t i = 1; i < Contigs->size(); i++)
-		{	
-			if (copyNumberInsideThreshold(static_cast<float>(Contigs->at(i).numRepeats) / coverage_depth, wMedian / kCount, count_threshold) && 
-				(Contigs->at(i).contigName == currentContig) &&
-				(Contigs->at(i).end >= segEndBase) &&
-				(Contigs->at(i).end - segEndBase <= gap_len)
-			) // Inside the threshold
-			{		
-				segEndBase = Contigs->at(i).end;
-				
-				wMedian = wMedian + (static_cast<float>(Contigs->at(i).numRepeats) / coverage_depth);
-				kCount = kCount + 1;
-			}
-			else // Outside the threshold or gap too big 
-			{
-				if (Contigs->at(i).start < segEndBase && Contigs->at(i).contigName == currentContig)
-				{
-					if (segEndBase > segStartBase + 1) {
-						valSegment->push_back(SegmentInfo(currentContig, segStartBase, segEndBase - 1, wMedian / kCount));
-						*wout << currentContig << "\t" << segStartBase << "\t" << segEndBase - 1 << "\t" << roundCount(wMedian / kCount) << endl;
-						segStartBase = segEndBase;
-					}
-				}
-				else
-				{
-					if (segEndBase > segStartBase + 1) {
-						valSegment->push_back(SegmentInfo(currentContig, segStartBase, segEndBase - 1, wMedian / kCount));
-						*wout << currentContig << "\t" << segStartBase << "\t" << segEndBase - 1 << "\t" << roundCount(wMedian / kCount) << endl;
-					}
-					segStartBase = Contigs->at(i).start;
-				}
-
-				currentContig = Contigs->at(i).contigName;
-				segEndBase = Contigs->at(i).end;
-				
-				wMedian = static_cast<float>(Contigs->at(i).numRepeats) / coverage_depth;
-				kCount = 1;	
-			}	
-		} 	 
-
-		// Always flush the final active segment of the contig
-		if (segEndBase > segStartBase + 1) {
-			valSegment->push_back(SegmentInfo(currentContig, segStartBase, segEndBase - 1, wMedian / kCount));
-			*wout << currentContig << "\t" << segStartBase << "\t" << segEndBase - 1 << "\t" << roundCount(wMedian / kCount) << endl;
+		if (copyNumberInsideThreshold(static_cast<float>(Contigs->at(i).numRepeats) / coverage_depth, wMedian / kCount, count_threshold) && 
+			(Contigs->at(i).contigName == currentContig) &&
+			(Contigs->at(i).end >= segEndBase) &&
+			(Contigs->at(i).end - segEndBase <= gap_len)
+		) // Inside the threshold
+		{		
+			segEndBase = Contigs->at(i).end;
+			wMedian += static_cast<float>(Contigs->at(i).numRepeats) / coverage_depth;
+			kCount += 1;
 		}
-		segTable->push_back(valSegment);
-	}
-}
+		else // Outside the threshold or gap too big 
+		{
+			if (Contigs->at(i).start < segEndBase && Contigs->at(i).contigName == currentContig)
+			{
+				if (segEndBase > segStartBase) {
+					valSegment->push_back(SegmentInfo(currentContig, segStartBase, segEndBase, wMedian / kCount));
+					segStartBase = segEndBase;
+				}
+			}
+			else
+			{
+				if (segEndBase > segStartBase) {
+					valSegment->push_back(SegmentInfo(currentContig, segStartBase, segEndBase, wMedian / kCount));
+				}
+				segStartBase = Contigs->at(i).start;
+			}
 
+			currentContig = Contigs->at(i).contigName;
+			segEndBase = Contigs->at(i).end;
+			wMedian = static_cast<float>(Contigs->at(i).numRepeats) / coverage_depth;
+			kCount = 1;	
+		}	
+	} 	 
+
+	// Always flush the final active segment of the contig using 0-based half-open [start, end) BED coordinates
+	if (segEndBase > segStartBase) {
+		valSegment->push_back(SegmentInfo(currentContig, segStartBase, segEndBase, wMedian / kCount));
+	}
+	return valSegment;
+}
 
 
 void noiseFilter(CONTIGLIST *contigs, uint windowSize)
@@ -134,11 +110,9 @@ void noiseFilter(CONTIGLIST *contigs, uint windowSize)
 }
 
 
-
-
 int query(const std::string& seq, const std::vector<std::string>& seeds, const btllib::CountingBloomFilter16 *cbf)
 {
-	if (seeds.empty()) {
+	if (seeds.empty() || cbf == nullptr) {
 		return 0;
 	}
 	std::vector<int> repeats(seeds.size(), 0);
@@ -154,65 +128,79 @@ int query(const std::string& seq, const std::vector<std::string>& seeds, const b
 }
 
 
-
-
-
-
-void checkRepeats(
+bool checkRepeats(
 	SEQLIST *assembly, CBF *cbf, uint kMerSize, string seed1, 
-	long double genomeSize, uint windowSize, string outfile_path, uint min_seg_len, uint count_threshold)
+	uint windowSize, string outfile_path, uint min_seg_len, uint count_threshold)
 {	
-	// Variables for reading sequences
-	string name = "";
-	string temp = "";
-
-	uint repeats = 0;
-	uint start = 0;
-	uint end = 0;
-	uint num_elements = assembly->size();
-	uint idx;
-	std::vector<std::string> seeds = {seed1};
-
 	ofstream wout(outfile_path);
-	const float header_coverage = (k_assembly > 0)
+	if (!wout.is_open()) {
+		cerr << "[!] Error: Could not open output BED file: " << outfile_path << endl;
+		return false;
+	}
+
+	const float exact_coverage = (k_assembly > 0)
 		? (static_cast<float>(k_reads) / static_cast<float>(k_assembly))
 		: 0.0f;
-	wout << "# k: " << kMerSize << " coverage depth: " << roundCount(header_coverage) << " seg_min: " << min_seg_len << " gap_len: " << kMerSize << " count_threshold: " << count_threshold << endl;
+	wout << "# k: " << kMerSize << " coverage depth: " << exact_coverage
+	     << " seg_min: " << min_seg_len << " gap_len: " << kMerSize
+	     << " count_threshold: " << count_threshold << endl;
 
+	const size_t num_elements = assembly->size();
+	const std::vector<std::string> seeds = {seed1};
+	const std::vector<btllib::SpacedSeed> parsedSeeds = btllib::parse_seeds(seeds);
+	const unsigned cbfHashNum = cbf->get_hash_num();
 
-	#pragma omp parallel for shared(assembly, cbf, windowSize, outfile_path, kMerSize, min_seg_len, count_threshold) private (idx, repeats, temp, start, end)
-	for (idx = 0; idx < num_elements; idx++)
+	// Pre-size segTable so threads write deterministically without lock contention
+	for (size_t i = 0; i < segTable->size(); ++i) {
+		delete segTable->at(i);
+	}
+	segTable->clear();
+	for (size_t i = 0; i < num_elements; ++i) {
+		segTable->push_back(nullptr);
+	}
+
+	#pragma omp parallel for schedule(dynamic, 1) shared(assembly, cbf, parsedSeeds, windowSize, kMerSize, count_threshold)
+	for (size_t idx = 0; idx < num_elements; idx++)
 	{	
-		CONTIGLIST *contigs = new CONTIGLIST();
-		if (assembly->at(idx).data.size() >= kMerSize)
+		const std::string& contigSeq = assembly->at(idx).data;
+		const std::string& contigName = assembly->at(idx).name;
+
+		if (contigSeq.size() >= kMerSize)
 		{
-			for (uint j = 0; j <= assembly->at(idx).data.size() - kMerSize; j++)
+			CONTIGLIST contigs;
+			btllib::SeedNtHash h(contigSeq, parsedSeeds, cbfHashNum, kMerSize);
+			while (h.roll())
 			{
-				temp = assembly->at(idx).data.substr(j, kMerSize);
-				repeats = query(temp, seeds, cbf);
-				if (repeats != 0 )
+				const auto count = cbf->contains(h.hashes());
+				if (count != 0)
 				{
-					start = j;
-					end = start + kMerSize;
-					contigs->push_back(ContigRepeatInfo(assembly->at(idx).name.substr(1, assembly->at(idx).name.size()), start, end, repeats));
+					const uint start = static_cast<uint>(h.get_pos());
+					const uint end = start + kMerSize;
+					contigs.push_back(ContigRepeatInfo(contigName, start, end, static_cast<uint>(count)));
 				}
 			}
 
-			if (contigs->size() > 0)
+			if (!contigs.empty())
 			{
-				// First filter out the noise in the contig
-				noiseFilter(contigs, windowSize);
-				// Create Segments in the contig
-				createSegments(contigs, &wout, kMerSize, min_seg_len, count_threshold);
+				noiseFilter(&contigs, windowSize);
+				segTable->at(idx) = createSegments(&contigs, kMerSize, count_threshold);
 			}
-			
-		} 
-		delete contigs;
+		}
+	}
 
- 	} 	
+	// Write unmerged segments sequentially in deterministic FASTA contig order
+	for (size_t idx = 0; idx < num_elements; ++idx) {
+		SEGMENTINFO* segs = segTable->at(idx);
+		if (segs == nullptr) continue;
+		for (size_t s = 0; s < segs->size(); ++s) {
+			const SegmentInfo& seg = segs->at(s);
+			wout << seg.segmentName << "\t" << seg.start << "\t" << seg.end << "\t" << roundCount(seg.count) << "\n";
+		}
+	}
 
-	 wout.close();
+	wout.flush();
+	bool ok = wout.good();
+	wout.close();
 
-	return;
-
+	return ok;
 }

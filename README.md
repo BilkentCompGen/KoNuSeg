@@ -54,25 +54,31 @@ make clean
 
 | Parameter | Description |
 | :--- | :--- |
-| `-fq` | Path to input FASTQ file |
-| `-fa` | Path to input FASTA file |
-| `-o` | Path to output BED file |
+| `-fq` | Path to input reads file (FASTQ or FASTA, supports `.gz`/`.bz2`/`.xz`; optional when `-load_cbf` is used) |
+| `-fa` | Path to input assembly FASTA file (supports `.gz`/`.bz2`/`.xz`) |
+| `-o` | Path to output BED file (merged output written to `<o>_merged.bed`) |
 
 ### Optional Parameters
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `-g` | `3000000000` | Genome size |
-| `-s` | `10010111001110100101110011101001` | Seed value |
+| `-g` | `3000000000` | Genome size (automatically sets `-anum` and `-knum` when those flags are omitted) |
+| `-s` | `10010111001110100101110011101001` | Binary spaced-seed mask (must match `-k`; auto-synced if only `-k` or `-s` is given) |
 | `-k` | `32` | K-mer length |
-| `-fpr` | `0.01` | False positive rate |
-| `-w` | `5` | Filtering window size |
-| `-minseg` | `500` | Minimum segment length for merging |
-| `-c_thresh` | `1` | Count threshold for merging |
-| `-anum` | `1500000000` | Distinct number of k-mers in assembly/reference |
-| `-knum` | `1500000000` | Distinct number of k-mers in reads |
+| `-fpr` | `0.01` | Target Bloom filter false-positive rate |
+| `-w` | `5` | Sliding window size for median outlier filtering |
+| `-minseg` | `500` | Minimum segment length (bp) for Stage 2 merging |
+| `-c_thresh` | `1` | Copy-number threshold for Stage 1 segmentation and Stage 2 boundary compatibility |
+| `-anum` | `1500000000` | Expected distinct k-mers in assembly/reference |
+| `-knum` | `1500000000` | Expected distinct k-mers in reads |
+| `-save_bf` | — | Save populated Seed Bloom Filter (and `.meta` counts) to file |
+| `-load_bf` | — | Load prebuilt Seed Bloom Filter from file |
+| `-save_cbf` | — | Save populated Counting Bloom Filter (and `.meta` counts) to file |
+| `-load_cbf` | — | Load prebuilt Counting Bloom Filter from file (skips SBF build and read streaming) |
 
-If `-anum`  and `-knum` are not known, the size of the genome can be used. 
+If `-anum` and `-knum` are not known, passing `-g <genome_size>` automatically uses the genome size to dimension both filters.
+
+> **Note on Counter Saturation**: `KoNuSeg` uses 16-bit saturating counters (`btllib::CountingBloomFilter16`, max raw count `65,535`). At coverage $C$, estimated copy numbers saturate safely at $65,535 / C$ (e.g., ~120 copies at 545× effective Bloom filter coverage), which does not affect repeat classification (`>1`, `>2`, `>5`, `>10`). 
 
 ---
 

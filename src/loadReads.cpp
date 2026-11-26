@@ -1,14 +1,112 @@
 #include <loadReads.hpp>
 
+namespace {
+struct ReadSlice {
+	const char* data;
+	size_t len;
+};
+
+constexpr size_t READ_SLICE_KMER_TARGET = 65536;
+constexpr size_t BATCH_MAX_BYTES = 64ULL * 1024ULL * 1024ULL; // 64 MiB max buffered reads per batch
+
+ulong processReadSlice(
+	const char* data,
+	size_t len,
+	CBF *cbf,
+	SBF *seed_bf,
+	const std::vector<btllib::SpacedSeed>& parsedCbfSeeds,
+	unsigned cbfHashNum,
+	unsigned sbfHashNum,
+	bool reuseSbfHashes,
+	uint kMerSize)
+{
+	ulong hits = 0;
+	if (len < kMerSize) return 0;
+
+	if (reuseSbfHashes) {
+		btllib::SeedNtHash h(data, len, seed_bf->get_parsed_seeds(), sbfHashNum, kMerSize);
+		while (h.roll()) {
+			if (seed_bf->contains(h.hashes())) {
+				cbf->insert(h.hashes());
+				hits += 1;
+			}
+		}
+	} else {
+		btllib::SeedNtHash hSbf(data, len, seed_bf->get_parsed_seeds(), sbfHashNum, seed_bf->get_k());
+		while (hSbf.roll()) {
+			if (seed_bf->contains(hSbf.hashes())) {
+				const size_t kmerPos = hSbf.get_pos();
+				btllib::SeedNtHash hCbf(data + kmerPos, kMerSize, parsedCbfSeeds, cbfHashNum, kMerSize);
+				if (hCbf.roll()) {
+					cbf->insert(hCbf.hashes());
+					hits += 1;
+				}
+			}
+		}
+	}
+	return hits;
+}
+
+void flushReadBatch(
+	const std::vector<std::string>& batch,
+	CBF *cbf,
+	SBF *seed_bf,
+	const std::vector<btllib::SpacedSeed>& parsedCbfSeeds,
+	bool reuseSbfHashes,
+	uint kMerSize)
+{
+	if (batch.empty()) return;
+
+	std::vector<ReadSlice> slices;
+	slices.reserve(batch.size());
+	for (const std::string& r : batch) {
+		if (r.size() < kMerSize) continue;
+		const size_t totalStarts = r.size() - kMerSize + 1;
+		for (size_t offset = 0; offset < totalStarts; offset += READ_SLICE_KMER_TARGET) {
+			const size_t startsInSlice = std::min(READ_SLICE_KMER_TARGET, totalStarts - offset);
+			const size_t sliceLen = startsInSlice + kMerSize - 1;
+			slices.push_back(ReadSlice{r.c_str() + offset, sliceLen});
+		}
+	}
+
+	const unsigned cbfHashNum = cbf->get_hash_num();
+	const unsigned sbfHashNum = seed_bf->get_hash_num_per_seed();
+
+	#pragma omp parallel for schedule(dynamic, 1) shared(slices, cbf, seed_bf, parsedCbfSeeds) reduction(+ : k_reads)
+	for (size_t i = 0; i < slices.size(); i++) {
+		k_reads += processReadSlice(
+			slices[i].data,
+			slices[i].len,
+			cbf,
+			seed_bf,
+			parsedCbfSeeds,
+			cbfHashNum,
+			sbfHashNum,
+			reuseSbfHashes,
+			kMerSize);
+	}
+}
+} // namespace
 
 CBF *loadReads(
-	string readsFile, uint k_len, SEQLIST *assembly, SBF *seed_bf, 	ulong k_num, double fpr, string seed1,uint kMerSize)
+	string readsFile, SBF *seed_bf, ulong k_num, double fpr, string seed1, uint kMerSize)
 {
-	// Variables for reading sequences
-	string line, name, content; 
-	uint read_counter = 0;
+	// Verify reads file is accessible before allocating the Counting Bloom Filter
+	if (readsFile != "-" && readsFile.find("://") == string::npos) {
+		std::ifstream checkFile(readsFile);
+		if (!checkFile.is_open()) {
+			std::cerr << "[!] Error: Could not open reads file: " << readsFile << std::endl;
+			return nullptr;
+		}
+	}
 
-	
+	btllib::DataSource readsSource(readsFile);
+	FILE* fp = readsSource;
+	if (fp == nullptr) {
+		std::cerr << "[!] Error: Could not open reads stream: " << readsFile << std::endl;
+		return nullptr;
+	}
+
 	// Calculate the optimal number of counter slots (m) and convert to bytes for CountingBloomFilter16 (2 bytes per slot)
 	size_t cbfSlots = static_cast<size_t>((-1.0) * (static_cast<double>(k_num) * log(fpr)) / (log(2) * log(2)));
 	if (cbfSlots < 1) cbfSlots = 1;
@@ -16,15 +114,13 @@ CBF *loadReads(
 
 	// Calculate and store the optimal number of hash functions (k)
 	uint64_t optHashFunctions = static_cast<uint64_t>(round((static_cast<double>(cbfSlots) / k_num) * log(2)));
-
-	// Safety check: ensure at least one hash function is used
 	if (optHashFunctions < 1) optHashFunctions = 1;
 
 	cout << "\t\t\t[i] >----------------------------------------" << endl;
 	cout << "\t\t\t[i] >CBF Size:    " << cbfSlots << " counters (" << cbfBytes << " bytes)" << endl;
 
 	// Calculate GB for printing: CountingBloomFilter16 uses 2 bytes (uint16_t) per slot
-	cout << "\t\t\t[i] >CBF Memory:   " << std::fixed << std::setprecision(4) 
+	cout << "\t\t\t[i] >CBF Memory:   " << std::fixed << std::setprecision(4)
 		<< static_cast<double>(cbfBytes) / (1024.0 * 1024.0 * 1024.0) << " GB" << endl;
 
 	cout << "\t\t\t[i] >Optimal Hash Functions: " << optHashFunctions << endl;
@@ -33,90 +129,127 @@ CBF *loadReads(
 	// Initialize the CBF with the byte budget and optimized hash count
 	CBF* cbf = new CBF(cbfBytes, optHashFunctions);
 
-	ifstream reads(readsFile);
+	const std::vector<std::string> seeds = {seed1};
+	const std::vector<btllib::SpacedSeed> parsedCbfSeeds = btllib::parse_seeds(seeds);
+	const bool reuseSbfHashes = (seed_bf != nullptr) &&
+		(seed_bf->get_hash_num_per_seed() == cbf->get_hash_num()) &&
+		(seed_bf->get_k() == kMerSize) &&
+		(seed_bf->get_seeds() == seeds);
 
-	
-	// Get Reads
-	while (std::getline(reads, line)) {
+	const size_t batchMaxReads = std::max<size_t>(64, static_cast<size_t>(omp_get_max_threads()) * 8);
+	std::vector<std::string> readBatch;
+	readBatch.reserve(batchMaxReads);
+	size_t batchBytes = 0;
+
+	auto enqueueRead = [&](std::string& seq) {
+		if (seq.empty()) return;
+		batchBytes += seq.size();
+		readBatch.push_back(std::move(seq));
+		seq.clear();
+		if (readBatch.size() >= batchMaxReads || batchBytes >= BATCH_MAX_BYTES) {
+			flushReadBatch(readBatch, cbf, seed_bf, parsedCbfSeeds, reuseSbfHashes, kMerSize);
+			readBatch.clear();
+			batchBytes = 0;
+		}
+	};
+
+	// Stream FASTQ or FASTA reads via state-tracked parser (safe for Phred+33 '@'/'+' quality lines and compressed inputs)
+	enum class ReadState { HEADER, FASTQ_SEQ, FASTQ_QUAL, FASTA_SEQ };
+	ReadState state = ReadState::HEADER;
+	string line, content;
+	size_t seqLines = 0;
+	size_t qualLen = 0;
+
+	while (readLineFromStream(fp, line)) {
+		boost::trim_right(line);
 		if (line.empty()) continue;
 
-		if (line[0] == '@') {
-			// If we have DNA from the previous read, save it now
-			if (!content.empty()) {
-				populateCBF(cbf, content, assembly, seed_bf, k_num, fpr, seed1, kMerSize);
-				content = ""; // Clear for the next read
+		if (state == ReadState::HEADER) {
+			if (line[0] == '@') {
+				content.clear();
+				seqLines = 0;
+				qualLen = 0;
+				state = ReadState::FASTQ_SEQ;
+			} else if (line[0] == '>') {
+				content.clear();
+				state = ReadState::FASTA_SEQ;
 			}
-			
-			// Start the new read
-			boost::trim_right(line);
-			name = line;
-			read_counter = 1; 
 		}
-		else if (line[0] == '+') {
-			read_counter = 0; // Stop collecting DNA
+		else if (state == ReadState::FASTQ_SEQ) {
+			if (line[0] == '+') {
+				qualLen = 0;
+				state = ReadState::FASTQ_QUAL;
+			} else {
+				content.append(line);
+				seqLines++;
+			}
 		}
-		else if (read_counter == 1) {
-			// STEP 3: Accumulate multi-line DNA
-			boost::trim_right(line);
-			content.append(line);
+		else if (state == ReadState::FASTQ_QUAL) {
+			// Consume quality line(s) unconditionally even if Phred+33 starts with '@' (Q=31) or '+' (Q=10)
+			qualLen += line.size();
+			if (qualLen >= content.size() || seqLines <= 1) {
+				enqueueRead(content);
+				state = ReadState::HEADER;
+			}
+		}
+		else if (state == ReadState::FASTA_SEQ) {
+			if (line[0] == '>') {
+				enqueueRead(content);
+			} else {
+				content.append(line);
+			}
 		}
 	}
 
-	// Process the very last read
-	if (!content.empty()) {
-		populateCBF(cbf, content, assembly, seed_bf, k_num, fpr, seed1, kMerSize);
+	// Enqueue trailing record and flush remaining batch
+	if (!content.empty() && (state == ReadState::FASTA_SEQ || state == ReadState::FASTQ_SEQ || state == ReadState::FASTQ_QUAL)) {
+		enqueueRead(content);
+	}
+	if (!readBatch.empty()) {
+		flushReadBatch(readBatch, cbf, seed_bf, parsedCbfSeeds, reuseSbfHashes, kMerSize);
+		readBatch.clear();
 	}
 
-	cout <<"\t\t\t[i] >----------------------------------------" << endl;
-	cout <<"\t\t\t[i] >CBF occupancy: " << cbf->get_occupancy() << endl;
-	cout <<"\t\t\t[i] >----------------------------------------" << endl;
+	readsSource.close();
 
-	cout <<"\t\t\t[i] >----------------------------------------" << endl;
-	cout <<"\t\t\t[i] >K-MERS IN BLOOM FILTER: " << k_assembly << endl;
-	cout <<"\t\t\t[i] >K-MERS IN COUNTING BLOOM FILTER: " << k_reads << endl;
-	cout <<"\t\t\t[i] >BLOOM FITLER COVERAGE DEPTH: " << (k_assembly > 0 ? round(static_cast<float>(k_reads) / static_cast<float>(k_assembly)) : 0.0f) << endl;
-	cout <<"\t\t\t[i] >----------------------------------------" << endl;
+	const double exactCoverage = (k_assembly > 0)
+		? (static_cast<double>(k_reads) / static_cast<double>(k_assembly))
+		: 0.0;
+
+	cout << "\t\t\t[i] >----------------------------------------" << endl;
+	cout << "\t\t\t[i] >CBF occupancy: " << cbf->get_occupancy() << endl;
+	cout << "\t\t\t[i] >----------------------------------------" << endl;
+
+	cout << "\t\t\t[i] >----------------------------------------" << endl;
+	cout << "\t\t\t[i] >K-MERS IN BLOOM FILTER: " << k_assembly << endl;
+	cout << "\t\t\t[i] >K-MERS IN COUNTING BLOOM FILTER: " << k_reads << endl;
+	cout << "\t\t\t[i] >BLOOM FILTER COVERAGE DEPTH: " << exactCoverage << endl;
+	cout << "\t\t\t[i] >----------------------------------------" << endl;
 
 	return cbf;
 }
 
-
-
-
 void populateCBF(
-	CBF *cbf, string read, SEQLIST *assembly, SBF *seed_bf, ulong k_num, double fpr, string seed1,uint kMerSize)
+	CBF *cbf, const string& read, SBF *seed_bf, const string& seed1, uint kMerSize)
 {
-	string temp = "";
-  	std::vector<std::string> seeds = {seed1};
-	if (read.size() >= kMerSize)
-	{
-		#pragma omp parallel for shared(read, cbf, seed_bf) private(temp) reduction(+:k_reads)
-		for (uint j = 0; j <= read.size() - kMerSize; j++)
-		{
-			temp = read.substr(j, kMerSize);
+	if (read.size() < kMerSize || cbf == nullptr || seed_bf == nullptr) return;
+	const std::vector<std::string> seeds = {seed1};
+	const std::vector<btllib::SpacedSeed> parsedCbfSeeds = btllib::parse_seeds(seeds);
+	const bool reuseSbfHashes = (seed_bf->get_hash_num_per_seed() == cbf->get_hash_num()) &&
+		(seed_bf->get_k() == kMerSize) &&
+		(seed_bf->get_seeds() == seeds);
 
-			auto hit_seeds = seed_bf->contains(temp);
-
-			if (!hit_seeds.empty() && find(hit_seeds[0].begin(), hit_seeds[0].end(), 0) != hit_seeds[0].end())
-			{
-				populate(temp, seeds, cbf);
-				k_reads = k_reads + 1;
-			}
-		}
-	}
+	std::vector<std::string> singleBatch = {read};
+	flushReadBatch(singleBatch, cbf, seed_bf, parsedCbfSeeds, reuseSbfHashes, kMerSize);
 }
-
 
 void populate(const std::string& seq, const std::vector<std::string>& seeds, btllib::CountingBloomFilter16 *cbf)
 {
+	if (seeds.empty() || cbf == nullptr) return;
 	btllib::SeedNtHash h(seq, seeds, cbf->get_hash_num(), seeds[0].size());
 	while (h.roll()) {
 		for (unsigned i = 0; i < seeds.size(); i++) {
-		// temp array for seed[i]'s hashes
-			std::unique_ptr<uint64_t[]> hashes(new uint64_t[cbf->get_hash_num()]);
-			std::copy(h.hashes() + i * cbf->get_hash_num(), h.hashes() + (i + 1) * cbf->get_hash_num(), hashes.get());
-			cbf->insert(hashes.get());
+			cbf->insert(h.hashes() + i * cbf->get_hash_num());
 		}
 	}
 }
-

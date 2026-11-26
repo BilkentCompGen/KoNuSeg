@@ -41,8 +41,24 @@ using KoNuSegVector = std::vector<T>;
 #include <btllib/bloom_filter.hpp>
 #include <btllib/counting_bloom_filter.hpp>
 #include <btllib/nthash.hpp>
+#include <btllib/data_stream.hpp>
 
 #include <chrono>
+
+inline bool readLineFromStream(FILE* fp, std::string& line) {
+    line.clear();
+    if (fp == nullptr) return false;
+    char buf[4096];
+    while (std::fgets(buf, sizeof(buf), fp) != nullptr) {
+        size_t len = std::strlen(buf);
+        if (len > 0 && buf[len - 1] == '\n') {
+            line.append(buf, len - 1);
+            return true;
+        }
+        line.append(buf, len);
+    }
+    return !line.empty();
+}
 
 
 using namespace std;
@@ -54,6 +70,10 @@ class Config{
         string infile_fastq;
         string infile_fasta;
         string outfile_bed;
+        string save_bf_path;
+        string load_bf_path;
+        string save_cbf_path;
+        string load_cbf_path;
         
         // Default values (used if the user doesn't provide them in the terminal)
         long long genome_size = 3000000000; 
@@ -93,6 +113,10 @@ class Config{
             cout << "\t\t[i]:" << window_size << endl;
             cout << "\t\t[i]:" << seg_len << endl;
             cout << "\t\t[i]:" << count_threshold << endl;
+            if (!load_bf_path.empty()) cout << "\t\t[i]: load_bf=" << load_bf_path << endl;
+            if (!save_bf_path.empty()) cout << "\t\t[i]: save_bf=" << save_bf_path << endl;
+            if (!load_cbf_path.empty()) cout << "\t\t[i]: load_cbf=" << load_cbf_path << endl;
+            if (!save_cbf_path.empty()) cout << "\t\t[i]: save_cbf=" << save_cbf_path << endl;
             cout << "\t\t[i]: //////////////////////" << endl;
         }
 };

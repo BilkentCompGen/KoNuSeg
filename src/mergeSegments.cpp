@@ -10,125 +10,131 @@ void clear(std::vector<float>& arr) {
     arr.clear();
 }
 
-
-
-
-// Function to sort the array, eliminate the last 25% of the highest numbers,
-// and return the median of the remaining values
+// Sort pooled copy estimates, discard the top quartile (at least 1 highest outlier when size >= 2)
+// to suppress Bloom filter hash-collision inflation, and return the rounded median of the remainder.
 float processData(std::vector<float>& arr) {
-    // Sort the array
-    std::sort(arr.begin(), arr.end());
-
-    // Eliminate the last 25% of the highest numbers
-    size_t size = arr.size();
-    size_t remove_count = size / 4;  // Eliminate the top 25%
-    size_t new_size = size - remove_count;
-
-    // Create a new vector with the remaining values
-    std::vector<float> remaining(arr.begin(), arr.begin() + new_size);
-
-    // Find the median of the remaining values
-    size_t remaining_size = remaining.size();
-    if (remaining_size == 0) {
+    if (arr.empty()) {
         std::cerr << "Error: No values to calculate median" << std::endl;
-        return 0.0f; // Return a default value if no numbers are available
+        return 0.0f;
     }
 
+    std::sort(arr.begin(), arr.end());
+
+    const size_t size = arr.size();
+    const size_t remove_count = (size >= 2) ? ((size + 3) / 4) : 0;
+    const size_t remaining_size = size - remove_count;
+
     if (remaining_size % 2 == 0) {
-        // If even, median is the average of the two middle values
-        return roundCount((remaining[remaining_size / 2 - 1] + remaining[remaining_size / 2]) / 2.0f);
+        return roundCount((arr[remaining_size / 2 - 1] + arr[remaining_size / 2]) / 2.0f);
     } else {
-        // If odd, median is the middle value
-        return roundCount(remaining[remaining_size / 2]);
+        return roundCount(arr[remaining_size / 2]);
     }
 }
 
 
-
-void mergeSegments(
+bool mergeSegments(
 	string outfile_path, uint k_len, uint min_seg_len, uint count_threshold)
 {
-	ofstream wout(outfile_path + "_merged.bed");
+	string merged_path = outfile_path + "_merged.bed";
+	ofstream wout(merged_path);
+	if (!wout.is_open()) {
+		cerr << "[!] Error: Could not open merged output BED file: " << merged_path << endl;
+		return false;
+	}
+
 	string currentSegment = "";
-	uint segStartBase;
-	uint segEndBase;
-	float segCpNo;
-	uint segCount;
+	uint segStartBase = 0;
+	uint segEndBase = 0;
 
 	std::vector<float> values;
-	uint gap_len = k_len;
-
-		
-	SEGMENTINFO *valSegment= new SEGMENTINFO();
+	SEGMENTINFO valSegment;
 	
-	for (int pos = 0; pos < segTable->size(); pos++)
+	for (size_t pos = 0; pos < segTable->size(); pos++)
 	{
 		SEGMENTINFO* segItem = segTable->at(pos);
-		// Each row in the cTable contains all the segments of the same contig
+		if (segItem == nullptr) continue;
 
-		for (int i = 0; i < segItem->size(); i++){
-						
-			// Initialising the first variables at the start of iteration through small segments
-			if(currentSegment == "" )
+		// Each row in segTable contains all the segments of the same contig
+		for (size_t i = 0; i < segItem->size(); i++)
+		{
+			const SegmentInfo& nextSeg = segItem->at(i);
+			const float nextRounded = roundCount(nextSeg.count);
+
+			if (currentSegment.empty())
 			{
-				currentSegment = segItem->at(i).segmentName;
-				segStartBase = segItem->at(i).start;
-				segEndBase = segItem->at(i).end;
-				segCpNo = roundCount(segItem->at(i).count);	
-				insert(values, segCpNo);
-
+				currentSegment = nextSeg.segmentName;
+				segStartBase = nextSeg.start;
+				segEndBase = nextSeg.end;
+				insert(values, nextRounded);
 			}
-			// If we are in the same contig and we have a non empty segment list
-			else
-			{ 
-				if (currentSegment.compare(segItem->at(i).segmentName)==0)
-				{	
-					// If the segment at hand is smaller than the minimum requirement for the min size && the gap between the end of 
-					// current segment and new one to be added is not > 3*k_len
-					if ((segEndBase - segStartBase < min_seg_len) && (segItem->at(i).start - segEndBase)<= 3*k_len)
-					{	
-						segEndBase = segItem->at(i).end;
-						insert(values, roundCount(segItem->at(i).count));
+			else if (currentSegment == nextSeg.segmentName)
+			{
+				const uint currentLen = (segEndBase >= segStartBase) ? (segEndBase - segStartBase) : 0;
+				const uint nextLen = (nextSeg.end >= nextSeg.start) ? (nextSeg.end - nextSeg.start) : 0;
+				const bool withinGap = (nextSeg.start <= segEndBase) ||
+					((nextSeg.start - segEndBase) <= 3 * k_len);
+
+				// Avoid absorbing a >= k_len flanking locus into an already full-sized (>= min_seg_len) block
+				// when their copy numbers differ by more than count_threshold, while smoothing sub-kmer (< k_len) artifacts.
+				const bool incompatibleLongBlock = (currentLen >= k_len) &&
+					(nextLen >= min_seg_len) &&
+					!values.empty() &&
+					(std::fabs(nextRounded - values.back()) > static_cast<float>(count_threshold));
+
+				if (currentLen < min_seg_len && withinGap && !incompatibleLongBlock)
+				{
+					if (nextSeg.end > segEndBase) {
+						segEndBase = nextSeg.end;
 					}
-					// If the segment is already >= than the minimum size requirement(MIN_SEG_SIZE)
-					else
-					{
-						
-						valSegment->push_back(SegmentInfo(currentSegment, segStartBase, segEndBase , processData(values)));
-				
-						currentSegment = segItem->at(i).segmentName;
-						segStartBase = segItem->at(i).start;
-						segEndBase = segItem->at(i).end;
-						clear(values);
-						insert(values, roundCount(segItem->at(i).count));		
-					}
+					insert(values, nextRounded);
 				}
-				// If we are in a different contig
 				else
-				{		
-					if (roundCount(segCpNo)>0)
-					{	
-						valSegment->push_back(SegmentInfo(currentSegment, segStartBase, segEndBase , processData(values)));
+				{
+					float mergedCount = processData(values);
+					if (mergedCount > 0.0f) {
+						valSegment.push_back(SegmentInfo(currentSegment, segStartBase, segEndBase, mergedCount));
 					}
-					currentSegment = segItem->at(i).segmentName;
-					segStartBase = segItem->at(i).start;
-					segEndBase = segItem->at(i).end;
+
+					currentSegment = nextSeg.segmentName;
+					segStartBase = nextSeg.start;
+					segEndBase = nextSeg.end;
 					clear(values);
-					insert(values, roundCount(segItem->at(i).count));
+					insert(values, nextRounded);
 				}
-			}													
+			}
+			// Different contig
+			else
+			{
+				float mergedCount = processData(values);
+				if (mergedCount > 0.0f)
+				{
+					valSegment.push_back(SegmentInfo(currentSegment, segStartBase, segEndBase, mergedCount));
+				}
+				currentSegment = nextSeg.segmentName;
+				segStartBase = nextSeg.start;
+				segEndBase = nextSeg.end;
+				clear(values);
+				insert(values, nextRounded);
+			}
 		}
 	}
 
-	//Inserting the last segment to the list
-	valSegment->push_back(SegmentInfo(currentSegment, segStartBase, segEndBase , roundCount(segCpNo)));
-
-
-
-	for (int j = 0; j < valSegment->size(); j++)
+	// Flush the last segment using processData(values) when non-empty
+	if (!currentSegment.empty() && !values.empty())
 	{
-		wout << valSegment->at(j).segmentName << "\t" <<valSegment->at(j).start<< "\t" <<valSegment->at(j).end<< "\t" <<valSegment->at(j).count<< endl;
+		float mergedCount = processData(values);
+		if (mergedCount > 0.0f) {
+			valSegment.push_back(SegmentInfo(currentSegment, segStartBase, segEndBase, mergedCount));
+		}
 	}
 
-}
+	for (size_t j = 0; j < valSegment.size(); j++)
+	{
+		wout << valSegment.at(j).segmentName << "\t" << valSegment.at(j).start << "\t" << valSegment.at(j).end << "\t" << valSegment.at(j).count << "\n";
+	}
 
+	wout.flush();
+	bool ok = wout.good();
+	wout.close();
+	return ok;
+}

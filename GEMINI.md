@@ -57,37 +57,34 @@ KoNuSeg/
 The pipeline executes five sequential phases orchestrated by `main()` in `src/konuseg.cpp`:
 
 ### Stage 0: Configuration & Assembly Loading (`src/konuseg.cpp`, `src/loadAssembly.cpp`)
-- `parseCommandLine()` populates a `Config` instance (`incl/data_structs.hpp`).
-- `loadAssembly()` reads all FASTA records into `SEQLIST` (`boost::container::stable_vector<Sequence>`) in RAM so contigs can be reused during both Bloom filter population and repeat querying.
+- `parseCommandLine()` populates and validates a `Config` instance (`incl/data_structs.hpp`), automatically synchronizing `-k` and `-s` when only one is explicitly passed.
+- `loadAssembly()` streams FASTA contigs (plain or `.gz`/`.bz2`/`.xz` via `btllib::DataSource`) into `SEQLIST` in RAM, extracting clean whitespace-trimmed BED sequence IDs so contigs can be reused during both Bloom filter population and repeat querying.
 
 ### Stage 1: Populating the Seed Bloom Filter (`src/populateBF.cpp`)
 - Computes optimal filter parameters from expected distinct assembly k-mers (`-anum`, $n$) and false-positive rate (`-fpr`, $p$):
   $$m = -\frac{n \ln p}{(\ln 2)^2}, \qquad \text{bytes} = \left\lceil \frac{m}{8} \right\rceil, \qquad k_{\text{hash}} = \max\!\left(1, \operatorname{round}\!\left(\frac{m}{n} \ln 2\right)\right)$$
-- Initializes `btllib::SeedBloomFilter` (`SBF`) with `bfBytes` and the user's spaced seed (`-s`).
-- Extracts all `k`-mers across each contig using fine-grained OpenMP parallelism (`#pragma omp parallel for` over k-mer start positions `j`), skipping `N`/non-`ACGT` k-mers via `btllib::SeedNtHash::roll()`, inserting valid spaced-seed hashes into `seed_bf`, and accumulating valid assembly k-mers in global `k_assembly`.
+- Initializes `btllib::SeedBloomFilter` (`SBF`) with `bfBytes` and the user's spaced seed (`-s`) (or loads a prebuilt filter via `-load_bf` and optionally saves via `-save_bf`).
+- Partitions contigs into 64k-start `SeqSlice` chunks (`k - 1` overlap) and runs rolling `btllib::SeedNtHash` (`#pragma omp parallel for schedule(dynamic, 1)`), skipping `N`/non-`ACGT` k-mers, inserting spaced-seed hashes into `seed_bf`, and accumulating valid assembly k-mers in global `k_assembly`.
 
 ### Stage 2: Streaming Reads & Populating the Counting Bloom Filter (`src/loadReads.cpp`)
-- Computes optimal counter slot count `cbfSlots` ($m$) and `optHashFunctions` from expected distinct read k-mers (`-knum`) and `-fpr`, converting to `cbfBytes = cbfSlots * sizeof(uint16_t)` to initialize `btllib::CountingBloomFilter16` (`CBF`, 16-bit atomic counters saturating at `65,535`).
-- Streams the input FASTQ file record-by-record without retaining raw reads in RAM.
-- For each read (`populateCBF()`), threads extract k-mers in parallel and query `seed_bf->contains(kmer)`:
-  - **Invalid (`N`) or Absent in SBF**: Guarded via `!hit_seeds.empty()`; k-mers with `N`s or sequencing errors (absent from the assembly) are discarded.
-  - **Present in SBF**: Hashed with `btllib::SeedNtHash` using the same spaced seed (`populate()`) and inserted into `cbf`, incrementing global `k_reads`.
-- **Bloom Filter Coverage** is defined as `k_reads / k_assembly` (the effective k-mer depth of coverage in the Counting Bloom filter).
+- Computes optimal counter slot count `cbfSlots` ($m$) and `optHashFunctions` from expected distinct read k-mers (`-knum`) and `-fpr`, converting to `cbfBytes = cbfSlots * sizeof(uint16_t)` to initialize `btllib::CountingBloomFilter16` (`CBF`, 16-bit atomic counters saturating at `65,535`, capping estimated copy numbers at $65,535 / \text{coverage}$), or loads a prebuilt filter directly via `-load_cbf` (and optionally saves via `-save_cbf`).
+- Streams input reads (FASTQ or FASTA, uncompressed or `.gz`/`.bz2`/`.xz` via `btllib::DataSource`) in bounded multi-read batches (`max(64, 8 * threads)` reads up to 64 MiB).
+- Across each batch, OpenMP workers roll `btllib::SeedNtHash` over 64k-start `ReadSlice`s:
+  - **Absent in SBF** (or `N`-containing): Discarded with zero heap allocations.
+  - **Present in SBF**: Reuses `h.hashes()` directly to insert into `cbf` and increments `k_reads`.
+- **Bloom Filter Coverage** is computed and logged as the exact continuous ratio `double(k_reads) / double(k_assembly)`.
 
 ### Stage 3: Querying, Outlier Filtering, & Unmerged Segmentation (`src/checkRepeats.cpp`)
-- Iterates over contigs in parallel (`#pragma omp parallel for` over contigs in `checkRepeats()`).
-- **Querying (`query()`)**: Re-extracts each contig k-mer, hashes with `SeedNtHash` (returning `0` for `N`-containing k-mers), queries `cbf->contains()`, and stores non-zero k-mer intervals in a thread-local `CONTIGLIST`.
-- **Outlier Filtering (`noiseFilter()`)**: Slides a centered window of size `-w` (`windowSize`) out-of-place over the contig's raw k-mer counts (`std::vector<uint>`) to replace hash-collision spikes with the local window median.
-- **Unmerged Segmentation (`createSegments()`)**: Inside an `#pragma omp critical` section:
-  - Normalizes k-mer counts by continuous floating-point `coverage_depth = float(k_reads) / float(k_assembly)` (guarded when `k_assembly == 0` or `k_reads == 0`).
-  - Iterates across all contig k-mers (`i = 1 .. size - 1`), extending the current segment while consecutive k-mers remain within `±count_threshold` (`-c_thresh`) of the segment's running mean copy number (`wMedian / kCount`), have copy number `> 0.1`, and gap `<= k_len`.
-  - Writes finalized high-resolution ("unmerged") segments (including the trailing segment at the end of each contig) to `<outfile_bed>` and appends per-contig `SEGMENTINFO*` vectors to global `segTable`.
-- `seed_bf` is freed immediately after `checkRepeats()` returns (`src/konuseg.cpp:118`).
+- Pre-sizes `segTable` to `assembly->size()` and processes contigs lock-free via `#pragma omp parallel for schedule(dynamic, 1)`:
+  - **Querying**: Rolls a single `btllib::SeedNtHash` across each contig, querying `cbf->contains(h.hashes())` and storing non-zero `[pos, pos + k)` intervals in a local `CONTIGLIST`.
+  - **Outlier Filtering (`noiseFilter()`)**: Slides a centered window of size `-w` (`windowSize`) out-of-place over the contig's raw k-mer counts (`std::vector<uint>`) to replace hash-collision spikes with the local window median.
+  - **Unmerged Segmentation (`createSegments()`)**: Normalizes k-mer counts by exact continuous `coverage_depth = float(k_reads) / float(k_assembly)`, extends segments while consecutive k-mers remain within `±count_threshold` (`-c_thresh`) of the running mean copy number (`wMedian / kCount`), and stores each contig's `SEGMENTINFO*` into `segTable->at(idx)`.
+- Writes unmerged 0-based half-open `[start, end)` intervals sequentially in **deterministic FASTA contig order** to `<outfile_bed>`.
 
 ### Stage 4: Segment Pooling & Merging (`src/mergeSegments.cpp`)
 - `mergeSegments()` iterates sequentially through `segTable` to smooth short segments into longer genomic blocks:
-  - Concatenates consecutive unmerged segments on the same contig while accumulated segment length `< min_seg_len` (`-minseg`) and inter-segment gap `<= 3 * k_len`.
-  - Once `min_seg_len` is reached (or a contig/gap boundary occurs), `processData()` sorts the pooled segment copy numbers, removes the highest 25% (`size / 4`) to suppress residual hash-collision inflation, computes the median of the remaining 75%, passes it through `roundCount()`, and writes the merged intervals to `<outfile_bed>_merged.bed`.
+  - Concatenates consecutive unmerged segments on the same contig while accumulated segment length `< min_seg_len` (`-minseg`), inter-segment gap `<= 3 * k_len`, and without absorbing short flanking segments into already full-sized (`>= min_seg_len`) blocks whose copy state differs by `> count_threshold`.
+  - `processData()` sorts pooled copy numbers, removes the top quartile (`(size + 3) / 4` when `size >= 2`, ensuring at least 1 collision outlier is dropped even in 2–3 segment pools), takes the median of the remaining values through `roundCount()`, and writes merged intervals to `<outfile_bed>_merged.bed`.
 
 ### Copy-Number Rounding Heuristic (`roundCount()` in `incl/data_structs.hpp`)
 - `< 0.25` -> `0.0`
@@ -105,18 +102,22 @@ The pipeline executes five sequential phases orchestrated by `main()` in `src/ko
 
 | Flag | Required | Default | Internal Field | Description |
 | :--- | :---: | :--- | :--- | :--- |
-| `-fq` | Yes | — | `Config::infile_fastq` | Input sequencing reads in uncompressed FASTQ format |
-| `-fa` | Yes | — | `Config::infile_fasta` | Input draft assembly contigs in uncompressed FASTA format |
+| `-fq` | Yes* | — | `Config::infile_fastq` | Input sequencing reads (FASTQ/FASTA; supports `.gz`/`.bz2`/`.xz`; *optional with `-load_cbf`) |
+| `-fa` | Yes | — | `Config::infile_fasta` | Input draft assembly contigs in FASTA format (supports `.gz`/`.bz2`/`.xz`) |
 | `-o` | Yes | — | `Config::outfile_bed` | Output path for unmerged BED (merged written to `<o>_merged.bed`) |
-| `-g` | No | `3000000000` | `Config::genome_size` | Estimated genome size (currently unused in calculations) |
-| `-s` | No | `10010111001110100101110011101001` | `Config::seed1` | Binary spaced-seed mask (`1` = match, `0` = wildcard; length must match `-k`) |
-| `-k` | No | `32` | `Config::k_len` | K-mer length (must equal `seed1.size()`) |
+| `-g` | No | `3000000000` | `Config::genome_size` | Estimated genome size (sets `-anum` and `-knum` when those flags are omitted) |
+| `-s` | No | `10010111001110100101110011101001` | `Config::seed1` | Binary spaced-seed mask (`1` = match, `0` = wildcard; auto-synced if only `-k` or `-s` is passed) |
+| `-k` | No | `32` | `Config::k_len` | K-mer length |
 | `-fpr` | No | `0.01` | `Config::fpr` | Target Bloom filter false-positive rate |
 | `-w` | No | `5` | `Config::window_size` | Sliding window size for median outlier filtering |
 | `-minseg` | No | `500` | `Config::seg_len` | Minimum segment length (bp) target during Stage 2 merging |
-| `-c_thresh` | No | `1` | `Config::count_threshold` | Copy-number deviation threshold during Stage 1 unmerged segmentation |
+| `-c_thresh` | No | `1` | `Config::count_threshold` | Copy-number threshold for Stage 1 segmentation & Stage 2 boundary compatibility |
 | `-anum` | No | `1500000000` | `Config::a_num` | Expected distinct k-mers in the assembly (`SeedBloomFilter` sizing) |
 | `-knum` | No | `1500000000` | `Config::k_num` | Expected distinct k-mers in the reads (`CountingBloomFilter16` sizing) |
+| `-save_bf` | No | — | `Config::save_bf_path` | Save populated `SeedBloomFilter` (plus `.meta`) to disk |
+| `-load_bf` | No | — | `Config::load_bf_path` | Load prebuilt `SeedBloomFilter` from disk |
+| `-save_cbf` | No | — | `Config::save_cbf_path` | Save populated `CountingBloomFilter16` (plus `.meta`) to disk |
+| `-load_cbf` | No | — | `Config::load_cbf_path` | Load prebuilt `CountingBloomFilter16` from disk (skips SBF build & read streaming) |
 
 ### Practical Parameter Guidance (from Manuscript Benchmarks)
 - **Compact / moderately repetitive genomes** (*C. elegans* ~100 Mbp, *D. melanogaster* ~140 Mbp): Permissive-to-moderate masking thresholds (masking unmerged segments with copy estimate `>1`, `>2`, or `>5`) substantially improve scaffolding NGA50 (up to 4.72× in *C. elegans* and 2.04× in *D. melanogaster*) while reducing misassemblies.
@@ -151,7 +152,7 @@ make clean
 
 ## 6. Known Implementation Caveats (See `CODEREVIEW.md`)
 
-Developers modifying or extending KoNuSeg should keep the following implementation details in mind (note: **all critical issues C1–C6 from `CODEREVIEW.md` have been resolved** without modifying `btllib`):
-1. **Do Not Modify `btllib`**: Always respect `btllib` API contracts from the caller side (e.g., passing byte counts `(bfBits + 7) / 8` to `SeedBloomFilter` and `cbfSlots * sizeof(uint16_t)` to `CountingBloomFilter16`, and checking `SeedNtHash::roll()` / `!hit_seeds.empty()` on sequences that may contain `N`s).
-2. **BED Boundary & Merging Quirks (`H1`, `H2`)**: `createSegments()` currently writes `segEndBase - 1` while advancing `segStartBase = segEndBase` (leaving 1-bp gaps between adjacent BED records under half-open BED semantics), and `mergeSegments()` still retains stale `segCpNo` on its final flush (`src/mergeSegments.cpp:124`).
+Developers modifying or extending KoNuSeg should keep the following implementation details in mind (note: **all critical, high, and medium/performance issues `C1`–`C6`, `H1`–`H5`, `M1`–`M6`, and `P1`–`P3` from `CODEREVIEW.md` have been resolved** without modifying `btllib`):
+1. **Do Not Modify `btllib`**: Always respect `btllib` API contracts from the caller side (e.g., passing byte counts `(bfBits + 7) / 8` to `SeedBloomFilter` and `cbfSlots * sizeof(uint16_t)` to `CountingBloomFilter16`, using `btllib::DataSource` for compressed stream I/O, and checking `SeedNtHash::roll()` / `!hit_seeds.empty()` on sequences that may contain `N`s).
+2. **BED Coordinate Semantics**: Both `<outfile_bed>` and `<outfile_bed>_merged.bed` emit standard **0-based, half-open `[start, end)`** BED intervals directly compatible with `bedtools`.
 3. **Global Mutable State**: `k_assembly`, `k_reads`, and `segTable` are defined as `inline` globals in `incl/data_structs.hpp`.
